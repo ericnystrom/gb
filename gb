@@ -1,0 +1,1295 @@
+#!/bin/bash
+##
+## gb -- gradebook, for university classes, using recutils
+##
+## By Eric Nystrom, started: September 2015
+##
+version="March 3, 2016"
+##
+## Usage:
+##
+##   gb COMMAND gradebook.rec
+##
+##   For help, run without options or command "help"
+
+###################################
+### Notes about features to add ###
+###################################
+
+#   ##### Grade Items #####
+# - implement combo "create item and grade it for all students" function
+# - explore auto-creating "file request" through Dropbox for Education for collecting
+#     student papers; students do not need Dropbox to submit
+# - allow storage of comments: either item at student level, or enabled across the
+#     gradebook for a particular item (like bonus), latter might be easier to report.
+# - option to calculate final grades and add to student's record
+#
+#   ##### Grade Book Setup and Care #####
+# - prohibit writing to "closed" gradebook (-t classinfo status: closed)
+# - command to close out gradebook
+# - gradebook consistency checks: ensure all items contain bonus field in bonus-having category, total worth of categories
+# - permit multiple dropped assignments
+# - permit multiple bonus assignments in a category
+# - hooks for version control
+# - write CSV grade roster exporter, for importing to post final grades
+# - consistency check - make sure all items held by students have grade item (exception of notes, etc?)
+# - add more recutils constraints on fields to some elements of gradebook (to aid consistency in inserting)
+#
+#   ##### Querying / Reporting #####
+# - reports to students via email (including sample template)
+# - graphs in student reports
+# - explore pretty-fying printed reports (using postscript?)
+#
+#   ##### Groups #####
+# - Group email feature (external template?)
+# - Implement Group Grades
+# - Implement procedure to apply group grade(s) to group members (permitting adjustment if needed)
+#     step thru students, pull group, finding group grade
+# - Dialog to set group leader
+# - Dialog to set group topic
+# - Email group leaders (external template?)
+#
+#   ##### Other Ideas / Features #####
+# - Add dialog to create a new student
+# - Interactive command to add grade to student/group record prompting for score each time
+# - Flexible/loadable grading schemes (A+/A/A-...)
+# - support for recording and exporting Academic Status Reports
+# - support for using ~/.gbrc to set some default parameters
+#
+#   ##### Documentation / Generalization / Dissemination #####
+# - Write comprehensive documentation
+# - Create example gradebook as part of documentation
+# - Note interesting but potentially-dangerous tips in "diy" section (ongoing)
+# - genericize importer interface/scripts?
+# - version control for "gb" development
+# - post to github?
+
+#######################################################
+### Dependencies, command line options and settings ###
+#######################################################
+
+## Check dependency on "recsel" (part of "recutils" package in
+## Debian)
+if ! which recsel &>/dev/null; then
+    echo "Missing dependency, aborting: recsel"
+    exit 4
+fi
+
+## Check dependency on "gnuplot" (part of "gnuplot" package in
+## Debian), for reporting stats
+if ! which gnuplot &>/dev/null; then
+    echo "Missing dependency, aborting: gnuplot"
+    exit 4
+fi
+
+## requires recutils and, specifically, requires "readrec" bash
+## built-in to be loaded.  Die otherwise.
+enable -f /usr/lib/recutils/bash-builtins/readrec.so readrec || { echo 'could not load readrec.so; exiting' ; exit 1; }
+
+##################
+### Parameters ###
+##################
+
+## Eventually consider loading these from a ~/.gbrc
+
+## Default name for gradebook if not provided on command line
+defaultgradebook="gradebook.rec"
+
+## Default number of students per group, but will be overloaded
+## (i.e. if "numpergroup" is 4, and there are extra students, most
+## groups will have 4 and up to three groups will have 5
+numpergroup=4
+
+## File name prefix for output of "savereports"
+sturepprefix="student-reports"
+
+## Options to pass to LPR for printing reports
+##   Note: can get a printer name with lpstat -a, then set using lpr -P name
+lproptions=""
+
+#################
+### Functions ###
+#################
+
+function gb_showhelp() {
+    echo " "
+    echo "gb -- recutils-powered gradebook   --*--   version: $version"
+    echo " "
+    echo "Usage:  "
+    echo " "
+    echo "  gb COMMAND [gradebook.rec] OPTIONS"
+    echo " "
+    echo "Where COMMAND is one of:"
+    echo " "
+    echo "  check        : check gradebook.rec for integrity"
+    echo "  help         : display this help message"
+    echo "  briefinfo    : show brief info about categories"
+    echo "  info         : show detailed info about categories and grade items"
+    echo "  random       : print list of students in random order"
+    echo "  diy          : List useful do-it-yourself tips and techniques"
+    echo " "
+    echo "  newgradebook : Create a new gradebook"
+    echo "  makecat      : Make new grade category"
+    echo "  makeitem     : Make new grade item in existing category"
+    echo "  makegroups   : Create student groups, randomly, updating student and group records"
+    echo "  addgrade     : add entry for existing grade item to all student records (default score 0)"
+    echo "  noscoreitem  : show numbers of students with/without record of GRADEITEM"
+    echo "  zeronoscores : zero-out no-score GRADEITEM, creating item and setting it to zero for students w/o it"
+    echo "  absentcount  : Count of noted-absences by student"
+    echo "  absentsort   : Count of noted-absences, sorted by number"
+    echo "  dropstudent  : move student record to \"dropped\" status, with date"
+    echo "  student      : Run grade report for one student and display"
+    echo "  studentprint : Run grade report for one student and print it out"
+    echo "  studentraw   : Show raw database record for one student"
+    echo " "
+    echo "  reports      : run a batch of student reports, print to screen"
+    echo "  savereports  : run batch of reports, save in file student-reports-DATE.txt"
+    echo "  printreports : run student reports, send directly to printer"
+    echo "  gradestats   : show class stats for GRADEITEM, specify \"nozero\" to exclude scores of zero"
+    echo "  gradeplot    : breakdown (by pct) class stats for GRADEITEM, specify \"nozero\" to exclude scores of zero"
+    echo "  finalbrief   : report of current final grades for whole class, one student per line"
+    echo "  finalstats   : show stats for current overall final grades for whole class"
+    echo "  finalplot    : breakdown by percentages of current final class grades, with histogram"
+    
+    echo " "
+}
+
+function gb_addgradeall() {
+    ## pass grade item name and default score to function
+    #Example: recset -t 'students' -f 'dsa_0820_GTKY' -a '100' gradebook-hst318.rec
+    recset -t 'students' -f "$1" -a "$2" "$gradebook"
+    if [[ $? -ne 0 ]];
+    then
+       echo "Something went wrong: recset exit code: $?"
+    fi
+}
+
+function gb_backup() {
+    writedir=$(dirname $gradebook)
+    gbname=$(basename $gradebook .rec)
+    cp "$gradebook" "$writedir/$gbname.rec.bak"
+}
+
+function gb_blankorlf() {    ## Add a blank line, or a linefeed if desired; helps with printing
+	## Set $addlf to control this function
+	if [[ "$addlf" == "yes" ]]; then
+	    echo -ne "\\f"
+	else
+	    echo " "
+	fi
+}
+
+function gb_dropstudent() {     ## If $1 = $stuln and $2 = $stufn, drop student from class
+    	read -p "Drop date (e.g. \"nov 15\"): " dropdate
+
+	## Extract full student record using precise first and last names
+	sturecord=$(recsel -t 'students' -e "Last_Name = '$1' && First_Name = '$2'" "$gradebook")
+	if [[ -z $sturecord ]]; then
+	    echo "Problem retrieving student record, exiting"
+	    exit 1
+	fi
+
+	## use recins to insert that record into 'dropped' category in gradebook
+	recins -t 'dropped' -r "$sturecord" "$gradebook" || { echo 'failed to insert record (recins exit non-zero)' ; exit 1; }
+	
+	## use recset to add "dropdate" field to the record in "dropped" category
+	recset -t 'dropped' -e "Last_Name = '$1' && First_Name = '$2'" \
+	       -f dropdate -a "$dropdate" "$gradebook" || { echo 'failed to insert record (recset exit non-zero)' ; exit 1; }	
+	
+	## use recdel to remove that student's record from "students" category
+	recdel -t 'students' -e "Last_Name = '$1' && First_Name = '$2'" \
+	       "$gradebook" || { echo 'failed to insert record (recdel exit non-zero)' ; exit 1; }
+
+	echo "Student $2 $1 status changed to \"dropped\" effective $dropdate."
+	return 0
+}
+
+function gb_gradeplot() {     ## Plot histogram of gradeitem scores
+    ## pass gradeitem name and "nozero" (optional) to function
+    ## Fetch the worth, for converting into percents
+    gradevalue=$(recsel -t 'gradeitem' -P worth -e "item = '$1'" "$gradebook")
+    
+    ##   If "nozero" specified, ignore grades of zero; run stats and print to stdout
+    if [[ "$2" == "nozero" ]]; then
+	## Incorporate class name and section into header
+	echo "Plot of statistics for grade item \"$1\" (zero-length grades EXCLUDED)"
+	recsel -C -t 'students' -P "$1" "$gradebook" \
+	    | grep -v '0' |  awk '{ print ($1/'$gradevalue'*100)}' | gb_plot
+    else
+	## Incorporate class name and section into header
+	echo "Plot of statistics for grade item \"$1\" (zero-length grades INCLUDED)"
+	recsel -C -t 'students' -P "$1" "$gradebook" \
+	    | awk '{ print ($1/'$gradevalue'*100)}' | gb_plot
+    fi
+}
+
+function gb_gradestats() {     ## Print statistics about a gradeitem
+    ## pass gradeitem name and "nozero" (optional) to function
+    ##   If "nozero" specified, ignore grades of zero; run stats and print to stdout
+    if [[ "$2" == "nozero" ]]; then
+	## Incorporate class name and section into header
+	echo "Statistics for grade item \"$1\" (zero-length grades EXCLUDED)"
+	recsel -C -t 'students' -P "$1" "$gradebook" | grep -v '0' | gnuplot -e 'stats "-" using 1' 2>&1
+    else
+	## Incorporate class name and section into header
+	echo "Statistics for grade item \"$1\" (zero-length grades INCLUDED)"
+	recsel -C -t 'students' -P "$1" "$gradebook" | gnuplot -e 'stats "-" using 1' 2>&1
+    fi
+}
+
+function gb_itemexist() {     ## Check if a gradeitem exists in gradebook
+    ## Use function to test like this:
+    # if gb_itemexist $3; then
+    #     echo "yes"
+    # else
+    #     echo "no"
+    # fi
+    exists=$(recsel -t 'gradeitem' -e 'item = "'$1'"' "$gradebook")
+    if [[ -z $exists ]]; then
+	return 1
+    else
+	return 0
+    fi
+}
+
+function gb_letterize() {     ## convert a passed number into a letter grade, call by passing number in
+    # ASU grades listed but points breakdown at instructor discretion: https://students.asu.edu/grades
+    echo "$1" | awk '$1 >= 97.0 { print "A+" };
+         $1 < 97 && $1 >= 93.0 { print "A" };
+         $1 < 93 && $1 >= 90.0 { print "A-" };
+         $1 < 90 && $1 >= 87.0 { print "B+" };
+         $1 < 87 && $1 >= 83.0 { print "B" };
+         $1 < 83 && $1 >= 80.0 { print "B-" };
+         $1 < 80 && $1 >= 77.0 { print "C+" };
+         $1 < 77 && $1 >= 70.0 { print "C" };
+         $1 < 70 && $1 >= 60.0 { print "D" };
+         $1 < 60 { print "E" };
+    '
+}
+
+function gb_loadcatinfo() {       ## Load information about grade categories and grade items
+    catcount=0
+    ## Grab assignment info from gradebook. This loop done once per grade category:
+    while readrec ; do
+	# increment counter for global tracker
+	((catcount++))
+
+	#echo "Category: ${cat_id[0]} Number of Assignments: ${#item[@]} Names: ${item[@]}"
+	
+	# Update global arrays
+	catnames[catcount]="${cat_id[0]}"
+	catdesc[catcount]="${cat_name[0]}"
+	catworths[catcount]="${cat_worth[0]}"
+	catnumitems[catcount]="${#item[@]}"
+	catitems[catcount]="${item[@]}"
+	itemworths[catcount]="${worth[@]}"
+	catlowdrops[catcount]="${cat_lowdrop[0]}"
+	catbonus[catcount]="${cat_bonus[0]}"
+	if [[ ${catbonus[catcount]} == "yes" ]]; then
+	    catbonusitems[catcount]="${bonus[@]}"
+	fi
+	# now delete arrays because readrec doesn't do it and they will leak over into the next run
+	unset item
+	unset worth
+	unset bonus
+	unset cat_bonus
+    done < <(recsel -t gradeitem -j cat -G cat.id "$gradebook")
+}
+
+function gb_loadclassinfo() {     ## load basic class information
+    while readrec ; do
+	## Available in gradebook: title, section, iorformal, instructor, iemail, term, cap, notes, status
+	classnumber="$number"
+	classsection="$section"
+	classtitle="$title"
+	class_ior="$iorformal"
+	classinstructor="$instructor"
+	classiemail="$iemail"
+	classterm="$term"
+	classroomdaytime="$roomdaytime"
+	classstatus="$status"
+    done < <(recsel -t 'classinfo' -p 'number,section,title,iorformal,instructor,iemail,term,roomdaytime,status' "$gradebook")	
+}
+
+function gb_makecat() {
+    echo "*** Creating a new grade category ***"
+    echo " "
+    read -p "Descriptive name of category: " new_cat_name
+    read -p "Category identifier (e.g. \"exam\"): " new_cat_id
+    read -p "Category worth (percent of final grade): " new_cat_worth
+    read -p "Number of low items to drop (0/1): " new_cat_lowdrop
+    read -p "Does category contain bonus items? (yes/no) " new_cat_bonus
+    read -p "Notes (one line please): " new_cat_notes
+    
+    ## Do any further input validation here.  Note, later versions
+    ## might also use recutils validation for particular fields
+    
+    ## Confirm with user
+    echo " "
+    echo "name: $new_cat_name"
+    echo "id: $new_cat_id"
+    echo "worth: $new_cat_worth"
+    echo "lowdrop: $new_cat_lowdrop"
+    echo "bonus: $new_cat_bonus"
+    echo "notes: $new_cat_notes"
+    
+    echo " "
+    read -p "Is this correct? Y/y to insert into gradebook, any other key to exit: " doinsert
+    if [[ "$doinsert" == "y" || "$doinsert" == "Y" ]]; then
+	gb_backup
+	recins -t 'category' \
+	       -f 'name' -v "$new_cat_name" \
+	       -f 'id' -v "$new_cat_id" \
+	       -f 'worth' -v "$new_cat_worth" \
+	       -f 'lowdrop' -v "$new_cat_lowdrop" \
+	       -f 'bonus' -v "$new_cat_bonus" \
+	       -f 'notes' -v "$new_cat_notes" \
+	       "$gradebook" || { echo 'failed to insert record (recins exit non-zero)' ; exit 1; }
+	echo "Grade category \"$new_cat_name\" created in gradebook $gradebook."
+	exit 0
+    else
+	echo " "
+	echo "NOT inserting into gradebook, exiting."
+	exit 0
+    fi
+}
+
+
+function gb_makegroups() {
+    ## Check to see if there are existing groups, if so, exit
+    if [[ $(recsel -t students -P "count(group)" "$gradebook") -gt 0 ]]; then
+	echo "Groups appear to already be set up, exiting."
+	exit 1
+    fi
+    
+    ## Specify number per group on command line, like so, otherwise default to $numpergroup
+    ##   gb makegroups [GRADEBOOK.rec] 5
+    if [[ $1 -gt 0 ]]; then
+	pergroup=$1
+    else
+	pergroup=$numpergroup
+    fi
+    
+    ## Calculate the number of groups, the number of "extra"
+    ## students in larger groups, and set up counters
+    numgroups=$(echo "$(recsel -t students -c "$gradebook") / $pergroup" | bc)
+    over=$(echo "$(recsel -t students -c "$gradebook") % $pergroup" | bc)
+    ingroup=0
+    curgroup=1
+    
+    ## Add "group:" field to "groups" category in gradebook
+    for i in `seq 1 $numgroups` ; do recins -t groups -f group -v $i "$gradebook" ; done
+    
+    ## Read Full names from gradebook in random order, assign a
+    ## group, then note that in student record as well as group
+    ## record.  First "if" is for special case of group with extra
+    ## members; otherwise second "if" applies.
+    while read name ; do
+	
+	if [[ ($ingroup -eq $pergroup) && $over -gt 0 ]]; then
+	    # assign $name to $curgroup -- first note in student
+	    # record, then in groups record
+	    recset -t students -e "Full = '$name'" -f group -S $curgroup \
+		   "$gradebook" || { echo 'failed to insert group 
+                        in student record (recset exit non-zero)' ; exit 1; }
+	    recset -t groups -e "group = $curgroup" -f name -a "$name" \
+		   "$gradebook" || { echo 'failed to insert student 
+                        in group record (recset exit non-zero)' ; exit 1; }
+	    echo "$name -- Group $curgroup"
+	    ingroup=0
+	    curgroup=$((curgroup + 1))
+	    ## Decrement our number of $over loads
+	    over=$((over - 1))
+	    continue
+	fi
+	
+	## Normal routine -- assign names to group, then increment
+	if [[ $ingroup -le $pergroup ]]; then
+	    ## assign $name to $curgroup -- first note in student
+	    ## record, then in groups record
+	    echo "$name -- Group $curgroup"
+	    recset -t students -e "Full = '$name'" -f group -S $curgroup \
+		   "$gradebook" || { echo 'failed to insert group 
+                        in student record (recset exit non-zero)' ; exit 1; }
+	    recset -t groups -e "group = $curgroup" -f name -a "$name" \
+		   "$gradebook" || { echo 'failed to insert student 
+                        in group record (recset exit non-zero)' ; exit 1; }
+	    ## increment $ingroup, if the group is full and there
+	    ## are no extra students to overload with, increment
+	    ## the group counter to start filling next group on
+	    ## the next pass.
+	    ingroup=$((ingroup + 1))
+	    if [[ ($ingroup -eq $pergroup) && $over -eq 0 ]]; then
+		curgroup=$((curgroup + 1))
+		ingroup=0
+	    fi
+	fi
+    done < <(recsel -t students -R Full "$gradebook" | grep -v '^$' | sort -R)
+}
+
+function gb_makeitem() {      ## Make item in existing category
+    echo "*** Creating a new grade item ***"
+    echo " "
+    gb_showcategories
+    read -p "Category of item: " newitemcat
+	
+    ## we only end up in this loop if cat DOES exist, also fetch info about bonus
+    while readrec ; do
+	testcat=$id
+	testbonus=$bonus
+    done < <(recsel -t 'category' -e 'id = "'$newitemcat'"' "$gradebook")
+
+    if [[ ! -z $testcat ]]; then
+	## fetch info from user
+	read -p "Item identifier (e.g. \"exam_1\"): " new_item
+	read -p "Due date (e.g. \"nov 15\"): " new_duedate
+	read -p "Description (one line please): " new_desc
+	read -p "Worth: " new_worth
+	## if "bonus" is set, it came here from reading the category in this while loop
+	if [[ "$testbonus" == "yes" ]]; then
+	    read -p "Category permits bonus -- make item bonus? [Y/N] " dobonus
+	    if [[ "$dobonus" == "y" || "$dobonus" == "Y" ]]; then
+		new_bonus="yes"
+	    else
+		new_bonus="no"
+	    fi
+	fi
+	
+	## Confirm with user
+	echo " "
+	echo "item: $new_item"
+	echo "cat: $newitemcat"
+	echo "duedate: $new_duedate"
+	echo "desc: $new_desc"
+	echo "worth: $new_worth"
+	if [[ "$testbonus" == "yes" ]]; then
+	    echo "bonus: $new_bonus"
+	fi
+	echo " "
+	read -p "Is this correct? Y/y to insert into gradebook, any other key to exit: " doinsert
+	if [[ "$doinsert" == "y" || "$doinsert" == "Y" ]]; then
+	    #gb_backup     ## Backed up before calling gb_makeitem
+	    if [[ "$testbonus" == "yes" ]]; then
+		recins -t 'gradeitem' \
+		       -f 'item' -v "$new_item" \
+		       -f 'cat' -v "$newitemcat" \
+		       -f 'duedate' -v "$new_duedate" \
+		       -f 'desc' -v "$new_desc" \
+		       -f 'worth' -v "$new_worth" \
+		       -f 'bonus' -v "$new_bonus" \
+		       "$gradebook" || { echo 'failed to insert record (recins exit non-zero)' ; exit 1; }
+	    else
+		recins -t 'gradeitem' \
+		       -f 'item' -v "$new_item" \
+		       -f 'cat' -v "$newitemcat" \
+		       -f 'duedate' -v "$new_duedate" \
+		       -f 'desc' -v "$new_desc" \
+		       -f 'worth' -v "$new_worth" \
+		       "$gradebook" || { echo 'failed to insert record (recins exit non-zero)' ; exit 1; }
+	    fi
+	    echo "Grade item \"$new_item\" created and entered."
+	    echo " "
+	    echo "You perhaps might want to do \"gb addgrade $gradebook $new_item\" next,"
+	    echo "  to place this item on all student records with a default score."
+	    exit 0
+	else
+	    echo " "
+	    echo "NOT inserting into gradebook, exiting."
+	    exit 0
+	fi
+    else
+	echo "I didn't find this category: $newitemcat"
+	exit 1
+    fi
+}
+
+function gb_newgradebook() {      ## Make new gradebook
+    echo "*** Creating new gradebook ***"
+    if [[ -f "$gradebook" ]]; then
+	echo "   File \"$gradebook\" already exists; exiting"
+	exit 1
+    elif [[ a"$gradebook" == "a" ]]; then
+	read -p "Gradebook file name (ENTER for default \"gradebook.rec\"): " gradebook
+	if [[ a"$gradebook" == "a" ]]; then
+	    gradebook="gradebook.rec"
+	fi
+    else
+	echo "    Gradebook file name: $gradebook"
+    fi
+    echo " "
+    read -p "Course number (e.g. \"HST-318\"): " course_number
+    read -p "Formal descriptive title of course (e.g. \"History of Canines\"): " course_title
+    read -p "Section number (e.g. \"01\", \"38009\", etc): " course_section
+    read -p "Instructor of Record, Full Name (e.g. \"Dr. Stella T. Hound\"): " course_iorformal
+    read -p "Instructor preferred name usage, for emails etc. (e.g. \"Dr. Hound\"): " course_instr
+    read -p "Instructor email address: " course_iemail
+    read -p "Term (e.g. \"Fall 2015-C\"): " course_term
+    read -p "Room, Day, Time (e.g. \"SANCA 210, Tu/Th 1:30-2:45\"): " course_rdt
+    read -p "Enrollment Cap (e.g. \"40\"): " course_cap
+    read -p "Notes (one line please): " course_notes
+    
+    ## Do any further input validation here.  Note, later versions
+    ## might also use recutils validation for particular fields
+
+    ## Confirm with user
+    echo " "
+    echo "gradebook file name: $gradebook"
+    echo "number: $course_number"
+    echo "title: $course_title"
+    echo "section: $course_section"
+    echo "ior_formal: $course_iorformal"
+    echo "instructor: $course_instr"
+    echo "iemail: $course_iemail"
+    echo "term: $course_term"
+    echo "room/day/time: $course_rdt"
+    echo "cap: $course_cap"
+    echo "notes: $course_notes"
+    echo "status: open"
+    
+    echo " "
+    read -p "Is this correct? Y/y to create gradebook, any other key to exit: " doinsert
+    if [[ "$doinsert" == "y" || "$doinsert" == "Y" ]]; then
+	cat > "$gradebook" <<-EOF
+	%rec: classinfo
+	%doc: Class information
+	
+	number: $course_number
+	title: $course_title
+	section: $course_section
+	iorformal: $course_iorformal
+	instructor: $course_instr
+	iemail: $course_iemail
+	term: $course_term
+	roomdaytime: $course_rdt
+	cap: $course_cap
+	notes: $course_notes
+	status: open
+	
+	%rec: category
+	%doc: Description of Class Assignment Categories, must have bonus:yes if category contains bonus items
+	%key: id
+	
+	%rec: gradeitem
+	%doc: Description of individual grade items; if category contains bonus, each item must have bonus flag
+	%type: cat rec category
+	
+	%rec: groups
+	%doc: Student Groups
+	
+	%rec: students
+	%doc: Individual Student Records
+	
+	%rec: dropped
+	%doc: Move student records here if they withdraw from the class; mark with "dropdate" field
+
+	EOF
+
+	echo "Gradebook \"$gradebook\" created for course $course_number."
+	echo " "
+	echo "I would suggest using the \"makecat\" command next, followed by \"makeitem.\""
+	echo "Then use an importer to add students, such as \"gb-roster-asu XXXX-XXXX.csv\""
+	echo " "
+	exit 0
+    else
+	echo " "
+	echo "NOT creating gradebook, exiting."
+	exit 0
+    fi
+}
+
+function gb_noscoretozero() {       ## for students WITHOUT gradeitem, add it and set to zero
+    ## Be sure to test for item; back up gradebook first.
+    recset -t 'students' -e "!#$gradeitem" -f "$gradeitem" -a '0' "$gradebook"
+    if [[ $? -ne 0 ]];
+    then
+       echo "Something went wrong: recset exit code: $?"
+    fi
+}
+
+function gb_plot() {     ## Pipe a list of grades here; -->letters, histogram-->stdout
+    ## ASU scale: A+ 97.0+; A = 93-96.9; A- = 90-92.9 ; B+ = 87-89 ; B = 83-87 ;
+    ##     B- = 80-82.9 ; C+ = 77-79 ; C = 70-77 ; D = 60-69 ; E = 59.9 and below
+    awk 'BEGIN {aplus=0; a=0; aminus=0; bplus=0; b=0; bminus=0; c=0; d=0; e=0;}
+         $1 >= 97.0 { aplus++ };
+         $1 < 97 && $1 >= 93.0 { a++ };
+         $1 < 93 && $1 >= 90.0 { aminus++ };
+         $1 < 90 && $1 >= 87.0 { bplus++ };
+         $1 < 87 && $1 >= 83.0 { b++ };
+         $1 < 83 && $1 >= 80.0 { bminus++ };
+         $1 < 80 && $1 >= 77.0 { cplus++ };
+         $1 < 77 && $1 >= 70.0 { c++ };
+         $1 < 70 && $1 >= 60.0 { d++ };
+         $1 < 60 { e++ };
+         END {
+           printf "A+ (97.0+)      : "; print gensub(/0/, "#", "g", sprintf("%0*d", aplus, 0)), aplus
+           printf "A  (96.9-93.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", a, 0)), a
+           printf "A- (92.9-90.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", aminus, 0)), aminus
+           printf "B+ (89.9-87.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", bplus, 0)), bplus
+           printf "B  (86.9-83.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", b, 0)), b
+           printf "B- (82.9-80.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", bminus, 0)), bminus
+           printf "C+ (79.9-77.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", cplus, 0)), cplus
+           printf "C  (76.9-70.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", c, 0)), c
+           printf "D  (69.9-60.0)  : "; print gensub(/0/, "#", "g", sprintf("%0*d", d, 0)), d
+           printf "E  (59.9-below) : "; print gensub(/0/, "#", "g", sprintf("%0*d", e, 0)), e
+           print " "
+           printf "   A   : %d", (aplus + a + aminus);
+           printf " (%.2f%)\n", ((aplus + a + aminus) / (aplus + a + aminus + bplus + b + bminus + cplus + c + d + e) * 100.0);
+           printf "   B   : %d", (bplus + b + bminus);
+           printf " (%.2f%)\n", ((bplus + b + bminus) / (aplus + a + aminus + bplus + b + bminus + cplus + c + d + e) * 100.0);
+           printf "   A&B : %d", (aplus + a + aminus + bplus + b + bminus);
+           printf " (%.2f%)\n", ((aplus + a + aminus + bplus + b + bminus) / (aplus + a + aminus + bplus + b + bminus + cplus + c + d + e) * 100.0);
+    }'
+}
+
+function gb_querystudent() {      ## Prompt user for student name and set $stuln, $stufn
+    read -p "Student last name (case insensitive, partial ok): " stuqln
+    stuqnum=$(recsel -c -t 'students' -i -e 'Last_Name ~ "'$stuqln'"' "$gradebook")
+    echo "$stuqnum students found using search string: $stuqln"
+    echo " "
+    while readrec ; do
+	echo "   * $Last_Name, $First_Name"
+    done < <(recsel -t 'students' -i -e 'Last_Name ~ "'$stuqln'"' "$gradebook")
+    
+    if [[ $stuqnum -gt 1 ]]; then
+	while [ -z $stuln ] ; do
+	    echo " "
+	    echo "$stuqnum results, please be more specific."
+	    echo " "
+	    read -p "Student last name (case insensitive, partial ok): " stuaskln
+	    read -p "Student first name (case insensitive, partial ok): " stuaskfn
+	    echo " "
+	    stuqnum=$(recsel -c -t 'students' -i -e 'Last_Name ~ "'$stuaskln'" && First_Name ~ "'$stuaskfn'"' "$gradebook")
+	    while readrec ; do
+		echo "   Student:  $Last_Name, $First_Name"
+	    done < <(recsel -t 'students' -i -e 'Last_Name ~ "'$stuaskln'" && First_Name ~ "'$stuaskfn'"' "$gradebook")
+	    if [[ $stuqnum -eq 1 ]]; then
+		## If we found one match, set these, which allow us to escape the loop
+		stuln="$Last_Name"
+		stufn="$First_Name"
+	    fi
+	done
+    elif [[ $stuqnum -eq 1 ]]; then
+	stuln="$Last_Name"
+	stufn="$First_Name"
+    else
+	echo "No students found with search string \"$stuqln\""
+	exit 1
+    fi
+
+    ## Now in either case we should have one good $stufn, $stuln pair
+    ## This gets set and can be used outside function
+    #echo "Student is: $stuln, $stufn"
+}
+
+function gb_showbriefcatinfo() {
+    ## Class information header (run gb_loadclassinfo first)
+    echo "$classnumber ($classsection): $classtitle ($class_ior, $classterm)"
+    echo " "
+    ## Just step through arrays that have already been loaded.
+    for i in $(seq 1 $catcount); do
+	echo "Category: ${catnames[i]}	Worth: ${catworths[i]}	Desc: ${catdesc[i]}"
+	echo "   Number of Assignments: ${catnumitems[i]}	Lowest Dropped: ${catlowdrops[i]}"
+	if [[ ${catbonus[i]} == "yes" ]]; then
+	    echo "   Bonus: ${catbonus[i]}"
+	fi
+	## Add blank line or linefeed if desired
+	gb_blankorlf
+    done
+}
+
+function gb_showcategories() {      ## Show all grade categories
+    echo "Available categories:"
+    echo " "
+    while readrec ; do
+	echo "   * $id  ($name)"
+    done < <(recsel -t category -p id,name "$gradebook")
+    echo " "
+}
+
+function gb_showlongcatinfo() {
+    ## Class information header (run gb_loadclassinfo first)
+    echo "$classnumber ($classsection): $classtitle ($class_ior, $classterm)"
+    echo " "
+    ## Just step through arrays that have already been loaded.
+    for i in $(seq 1 $catcount); do
+	echo "Category: ${catnames[i]}	Worth: ${catworths[i]}	Desc: ${catdesc[i]}"
+	echo "   Number of Assignments: ${catnumitems[i]}	Lowest Dropped: ${catlowdrops[i]}"
+	if [[ ${catbonus[i]} == "yes" ]]; then
+	    echo "   Bonus: ${catbonus[i]}"
+	fi
+	# Retrieve individual items by temporarily setting a pair of
+	# arrays and stepping
+	itemtemp=(${catitems[$i]})
+	worthtemp=(${itemworths[$i]})
+	bonustemp=(${catbonusitems[$i]})
+	# Use number of items to step, so I can reference in both arrays;
+	# note arrays assigned like these start counting at zero
+	for j in $(seq 0 $(expr ${catnumitems[$i]} - 1))
+	do
+	    echo -n "   Individual item: ${itemtemp[$j]}, worth: ${worthtemp[$j]}"
+	    if [[ "${bonustemp[$j]}" == "yes" ]]; then
+	    	echo "   (Bonus)"
+	    else
+	    	echo " "
+	    fi
+	done
+	echo " "
+    done
+    ## Add blank line or linefeed if desired
+    gb_blankorlf
+}
+
+function gb_shownoscoreitem() {     ## show the number of recorded scores and students without scores for a given item name
+    echo "Gradeitem: $gradeitem"
+    echo -n "Students with a score for $gradeitem:    "
+    recsel -t 'students' -c -e '#'"$gradeitem" "$gradebook"
+    echo -n "Students WITHOUT a score for $gradeitem: "
+    recsel -t 'students' -c -e '!#'"$gradeitem" "$gradebook"
+}
+
+function gb_studentreports() {
+    ## Go through each student; calculate, and report
+    ## Note: needs to have run "gb_loadcatinfo" and "gb_loadclassinfo" first
+    ## Someday break this into a function to report on a single student; then loop elsewhere
+    while readrec ; do
+	gb_runreport
+	## Add blank line or linefeed if desired
+	gb_blankorlf    
+    done < <(recsel -t students "$gradebook")
+}
+
+function gb_runreport() {      ## function to compile a grade report about one student
+    ## ONLY meant to be run within a "while readrec" loop, so all variables will be supplied
+    ## call function with "finalonly" parameter to produce abbreviated output of final grade only
+    
+    ## Logic: step thru assignments (cat --> item(s)), apply student scores
+    
+    ## Report header -- name, date
+    if [[ "$1" != "finalonly" ]]; then
+	echo " "
+	echo "$First_Name $Last_Name  |  $classnumber $classtitle  |  $today"
+    fi
+    finalgradepts=0
+    catptsattempted=0
+    for i in $(seq 1 $catcount)
+    do
+	## Set up for each grade category
+	if [[ "$1" != "finalonly" ]]; then
+	    echo " "
+	    echo "   Category: ${catdesc[$i]} (${catnames[$i]})"
+	    echo "   Worth: ${catworths[$i]}% of total"
+	    echo -n "   Number of Items: ${catnumitems[$i]}, drop lowest: ${catlowdrops[$i]}"
+	    if [[ "${catbonus[$i]}" == "yes" ]]; then
+		echo "   Bonus item(s): yes"
+	    else
+		echo " "
+	    fi
+	fi
+	
+	## Extract list of individual grade items in this category
+	## and what they are each worth; then retrieve values for
+	## each of those items from student record; then calculate
+	
+	## Initialize $runtot for a running total of scores; have to
+	## initialize it because I use it in math in bc.  Also
+	## initialize a graded assignment counter, instead of using
+	## the "catnumitems", so that assignments that exist in the
+	## gradebook but have not been graded don't end up reflecting
+	## in final grade calculus.
+	runtot=0
+	gradedcount=0
+	
+	# Retrieve individual items by temporarily setting a pair of
+	# arrays and stepping using that awesome Bash indirect
+	# referencing notation
+	itemtemp=(${catitems[$i]})
+	worthtemp=(${itemworths[$i]})
+	bonustemp=(${catbonusitems[$i]})
+	
+	# keep student scores/items in arrays "scorestemp" and "scorestempitems"
+	declare -a scorestemp
+	declare -a scorestempitems
+	unset scorestemp
+	unset scorestempitems
+	
+	# Use number of items to step, so I can reference in both arrays;
+	# note arrays assigned like these start counting at zero
+	for b in $(seq 0 $(expr ${catnumitems[$i]} - 1))
+	do
+	    ## Work on each item. If there's a grade for it,
+	    ## calculate and print each item; also keep a running
+	    ## total for the category; and load into scorestemp
+		
+	    ## Using an extglob here to test for number, as
+	    ## per http://mywiki.wooledge.org/BashFAQ/054
+	    if [[ ${!itemtemp[$b]} != "" ]]; then
+		itemtot=$(echo "(${!itemtemp[$b]} / ${worthtemp[$b]})" | bc -l)
+		pct=$(printf %.2f $(echo "$itemtot * 100" | bc -l))
+		if [[ "$1" != "finalonly" ]]; then
+		    echo -n "     Item: ${itemtemp[$b]}, worth: ${worthtemp[$b]}, score: ${!itemtemp[$b]}, percent: $pct"
+		fi
+		## If we are dropping any low items, track lowest
+		## $itemtot values so they can be subtracted from
+		## $runtot at the end (as long as this isn't a bonus item)
+		if [[ ${catlowdrops[$i]} -gt 0 && "${bonustemp[$b]}" != "yes" ]]; then
+		    scorestemp=( "${scorestemp[@]}" "$itemtot" )
+		    scorestempitems=( "${scorestempitems[@]}" "${itemtemp[$b]}" )
+		fi
+		
+		## Note - runtot is probably a float, thus need to use bc
+		runtot=$(echo "$runtot + $itemtot" | bc -l)
+		#echo "Runtot: $runtot"
+		
+		## Check if it's a bonus item, if so, don't
+		## increment $gradedcount (do so otherwise);
+		## finish printing status line (from echo -n above)
+		if [[ "${bonustemp[$b]}" == "yes" ]]; then
+		    if [[ "$1" != "finalonly" ]]; then
+			echo "   (Bonus)"
+		    fi
+		else
+		    if [[ "$1" != "finalonly" ]]; then
+	    		echo " "
+		    fi
+		    ((gradedcount++))
+		fi
+		
+	    elif [[ "${bonustemp[$b]}" == "yes" ]]; then
+		if [[ "$1" != "finalonly" ]]; then
+		    echo "     Item: ${itemtemp[$b]}, worth: ${worthtemp[$b]} (Bonus), no score recorded"
+		fi
+	    else
+		if [[ "$1" != "finalonly" ]]; then
+		    echo "     Item: ${itemtemp[$b]}, worth: ${worthtemp[$b]}, no score recorded"
+		fi
+	    fi
+	    
+	    ## Clear out variables because, again, not done by
+	    ## readrec.  Note, here by using "$" we are clearing not
+	    ## the variable "itemtemp[b]" but the variable (set by
+	    ## readrec) whose name is contained in the variable
+	    ## "itemtemp[b]"
+	    unset ${itemtemp[$b]}
+	done
+	
+	## Clear array just in case
+	unset itemtemp
+	
+	## Now finish creating category grade for student, including dropping low scores
+	if [[ $gradedcount -gt 0 ]]; then
+	    ## If we are dropping one, say so; either way do final calc
+	    ## Find lowest score
+	    if [[ ${catlowdrops[$i]} -gt 0 ]]; then
+		lowidx=0
+		for a in $(seq 0 $(expr ${#scorestemp[*]} - 1)); do
+		    if (( $(echo "${scorestemp[$lowidx]} > ${scorestemp[$a]}" | bc -l) )); then
+			lowidx=$a
+		    fi
+		done
+		if [[ "$1" != "finalonly" ]]; then
+		    echo "       Dropping score: ${scorestempitems[$lowidx]}, weighted score: ${scorestemp[$lowidx]}"
+		fi
+		catfinalpts=$(echo "(($runtot - ${scorestemp[$lowidx]}) / ($gradedcount - 1)) * ${catworths[$i]}" | bc -l)
+	    else
+		catfinalpts=$(echo "$runtot / $gradedcount * ${catworths[$i]}" | bc -l)
+	    fi
+	    if [[ "$1" != "finalonly" ]]; then
+		echo "   Final category points: $catfinalpts"
+	    fi
+	    finalgradepts=$(echo "$finalgradepts + $catfinalpts" | bc -l)
+	    catptsattempted=$(expr $catptsattempted + ${catworths[$i]})
+	else
+	    if [[ "$1" != "finalonly" ]]; then
+		echo "   Final category points: No graded items in category"
+	    fi
+	fi
+    done
+    
+    ## Summarize final grade as known so far
+    finalpct=$(printf %.2f $(echo "($finalgradepts / $catptsattempted) * 100" | bc -l))
+    finalgrade=$(gb_letterize $finalpct)
+    if [[ "$1" != "finalonly" ]]; then
+	echo " "
+	echo "Final Grade Points: $finalgradepts out of $catptsattempted ($finalpct% / $finalgrade) so far."
+	echo " "
+    else
+	fullname="$Last_Name, $First_Name"
+	printf "%-30s\t%0.2f\t%-2s\t%3.4f\tout of\t%3d\n" "$fullname" $finalpct "$finalgrade" $finalgradepts $catptsattempted
+	#echo "$Last_Name, $First_Name		$finalpct%	$finalgrade	$finalgradepts out of $catptsattempted"
+    fi
+}
+
+#####################
+### Initial Setup ###
+#####################
+
+## If no command line parameters, display help
+if [[ a"$1" == "a" ]]; then
+    gb_showhelp
+    exit 0
+fi 
+
+## Capture the "command" parameter and shift
+gbcommand=$1
+shift
+
+## If new $1 is a file, that's our gradebook name; otherwise use
+## default gradebook name
+if [[ -f "$1" ]]; then
+    gradebook=$1
+    # check it's our gradebook and writable
+    # now shift so next parameters appear as $1
+    shift
+elif [[ $gbcommand == "newgradebook" ]]; then
+    gradebook=""
+else
+    gradebook=$defaultgradebook
+    # check it's our gradebook and writable
+    # Note, don't shift here because next parameter already is $1
+fi
+
+## Set today's date in a nice format, and in a compact one
+today=$(date +'%A, %B %d, %Y')
+shortdate=$(date +'%m%d%Y')
+
+###############################
+### Process Program Options ###
+###############################
+
+case $gbcommand in
+    absentcount)
+	## Count of noted absences by student
+	##   Only considers "absent:" field, NOT "excused_absence:" field
+	##   Rewrites field names for clarity
+	echo "Report of *noted* absences as of $today"
+	echo " "
+	recsel -t students -p "Full:Name,count(absent):Noted_Absences" "$gradebook"
+	;;
+    absentsort)
+	## Count of noted absences, sorted by number of absences
+	##   Only considers "absent:" field, NOT "excused_absence:" field
+	echo "Report of *noted* absences as of $today"
+	echo " "
+	recsel -t students -R "count(absent),Full" "$gradebook" | sed -e '/^$/d' | sort -nr
+	;;
+    addgrade)
+	## add existing grade item to all student records, set default grade
+
+	## Be sure we have correct parameters
+	if [[ -z $1 ]];
+	then
+	    echo "Must provide grade item name and, optionally, default grade"
+	    echo "  (default score is zero if left off)"
+	    echo " "
+	    echo "e.g. to add grade \"exam1\" to all students with a default score of 50:"
+	    echo " "
+	    echo "  gb addgrade [GRADEBOOK.rec] exam1 50"
+	    exit 1
+	fi
+
+	## Set default grade if blank
+	if [[ -z $2 ]];
+	then
+	    defaultgrade=0
+	else
+	    defaultgrade=$2
+	fi
+
+	## Set gradeitem; test existence of gradeitem in gradebook
+	gradeitem=$1
+	if ! gb_itemexist $gradeitem; then
+	    echo "No gradeitem found with this name: $gradeitem"
+	    exit 1
+	fi
+	
+	gb_backup
+	gb_addgradeall $gradeitem $defaultgrade
+	
+	echo "Added grade item $gradeitem to all students with score $defaultgrade."
+	exit 0
+	;;
+    briefinfo)
+	## RENAME? -- Show brief info about class, categories
+	gb_loadclassinfo
+	gb_loadcatinfo
+	gb_showbriefcatinfo
+	exit 0
+	;;
+    check)
+        ## Check our gradebook database for integrity
+	recfix --check "$gradebook"
+	if [[ $? -eq 0 ]]; then
+	    echo "No problems found with gradebook: $gradebook"
+	    exit 0
+	fi
+        ;;
+    dropstudent)
+	## Record a student as having withdrawn from the class (move
+	## from 'students' to 'dropped' category)
+	echo "*** Drop Student from Class ***"
+	echo " "
+	gb_querystudent
+	echo " "
+	echo "Student is: $stuln, $stufn"
+
+	gb_backup
+	gb_dropstudent "$stuln" "$stufn"
+
+	exit 0
+	;;
+    finalbrief)
+	## Complete set of final grades in brief form, display on screen
+	gb_loadclassinfo
+	gb_loadcatinfo
+	while readrec ; do
+	    gb_runreport finalonly
+	done < <(recsel -t students "$gradebook")
+	exit 0
+	;;
+    finalplot)
+	## Show breakdown by percentages of current final class grades, with histogram
+	gb_loadclassinfo
+	gb_loadcatinfo
+	## Header; eventually incorporate class name, section
+	echo "$classnumber $classtitle -- breakdown of current final grades ($today):"
+	echo " "
+	## "gb_plot" is function above
+	while readrec ; do
+	    gb_runreport finalonly
+	done < <(recsel -t students "$gradebook") | cut -d'	' -f2 | gb_plot
+	;;
+    finalstats)
+	## show stats for current overall final grades for whole class
+	gb_loadclassinfo
+	gb_loadcatinfo
+	## Header; eventually incorporate class name, section
+	echo "$classnumber $classtitle -- statistics about current final grades ($today):"
+	echo " "
+	## note, gnuplot sends "stats" output to stderr, so redirect
+	## to stdout so that output can be redirected to lpr from
+	## command line
+	while readrec ; do
+	    gb_runreport finalonly
+	done < <(recsel -t students "$gradebook") | cut -d'	' -f2 | gnuplot -e 'stats "-" using 1' 2>&1
+	exit 0
+	;;
+    gradeplot)
+	## Plot out the grade stats for a particular grade item, converted to 100% scale
+	## Be sure we have correct parameters
+	if [[ -z $1 ]];
+	then
+	    echo "Must provide grade item name and, optionally, specify if grades of zero should be ignored"
+	    echo "  (default is to include grades of zero)"
+	    echo " "
+	    echo "e.g. to plot statistics (on 100%) about gradeitem \"exam_1\" (including zero grades):"
+	    echo " "
+	    echo "  gb gradeplot [GRADEBOOK.rec] exam_1"
+	    echo " "
+	    echo "to plot statistics (on 100%) about gradeitem \"exam_1\" (EXCLUDING zero grades):"
+	    echo " "
+	    echo "  gb gradeplot [GRADEBOOK.rec] exam_1 nozero"
+	    exit 1
+	fi
+	
+	## Set gradeitem; test existence of gradeitem in gradebook
+	gradeitem=$1
+	if ! gb_itemexist $gradeitem; then
+	    echo "No gradeitem found with this name: $gradeitem"
+	    exit 1
+	fi
+
+	gb_gradeplot $gradeitem $2
+	;;
+    gradestats)
+	## Show stats for a particular grade item
+	## Be sure we have correct parameters
+	if [[ -z $1 ]];
+	then
+	    echo "Must provide grade item name and, optionally, specify if grades of zero should be ignored"
+	    echo "  (default is to include grades of zero)"
+	    echo " "
+	    echo "e.g. to report statistics about gradeitem \"exam_1\" (including zero grades):"
+	    echo " "
+	    echo "  gb gradestats [GRADEBOOK.rec] exam_1"
+	    echo " "
+	    echo "to report statistics about gradeitem \"exam_1\" (EXCLUDING zero grades):"
+	    echo " "
+	    echo "  gb gradestats [GRADEBOOK.rec] exam_1 nozero"
+	    exit 1
+	fi
+	
+	## Set gradeitem; test existence of gradeitem in gradebook
+	gradeitem=$1
+	if ! gb_itemexist $gradeitem; then
+	    echo "No gradeitem found with this name: $gradeitem"
+	    exit 1
+	fi
+	
+	gb_gradestats $gradeitem $2
+	;;
+    help)
+        ## Explain the options
+	gb_showhelp
+	exit 0
+        ;;
+    info)
+	## RENAME? -- Show detailed info about class, categories and grade items
+	gb_loadclassinfo
+	gb_loadcatinfo
+	gb_showlongcatinfo
+	exit 0
+	;;
+    makecat)
+	## Make new grade category
+	gb_backup
+	gb_makecat
+	;;
+    makegroups)
+	## create student groups, randomly, inserting into gradebook
+	gb_backup
+	gb_makegroups
+	;;
+    makeitem)
+	## Make new grade item in existing category
+	gb_backup
+	gb_makeitem
+	;;
+    newgradebook)
+	## Create a new gradebook
+	gb_newgradebook
+	;;
+    noscoreitem)
+	## show stats of how many students have, and how many do not have, a score
+	##   for a particular grade item
+	## Set gradeitem; test existence of gradeitem in gradebook
+	gradeitem=$1
+	if ! gb_itemexist $gradeitem; then
+	    echo "No gradeitem found with this name: $gradeitem"
+	    exit 1
+	fi
+	gb_shownoscoreitem
+	exit 0
+	;;
+    printreports)
+	## Run student reports and send directly to printer (ADD LPR OPTIONS)
+	addlf="yes"
+	gb_loadclassinfo
+	gb_loadcatinfo
+	gb_studentreports | lpr $lproptions
+	exit 0
+	;;
+    random)
+	## Print student names in random order
+	recsel -t students -R Last_Name,First_Name "$gradebook" | grep -v '^$' | sort -R 
+	;;
+    reports)
+	## Run a batch of individual student reports, display on screen
+	gb_loadclassinfo
+	gb_loadcatinfo
+	gb_studentreports
+	exit 0
+	;;
+    savereports)
+	## Run student reports, save to file
+	## Include linefeeds between reports?
+	addlf="yes"
+	gb_loadclassinfo
+	gb_loadcatinfo
+	gb_studentreports > "$sturepprefix-$shortdate.txt"
+	exit 0
+	;;
+    student)
+	## Run grade report for one student, print to screen
+	gb_loadclassinfo
+	gb_loadcatinfo
+	gb_querystudent
+	echo " "
+	echo "***** Report for $stuln, $stufn *****"
+	while readrec ; do
+	    gb_runreport
+	done < <(recsel -t 'students' -e "Last_Name = '$stuln' && First_Name = '$stufn'" "$gradebook")
+	;;
+    studentprint)
+	## Run grade report for one student and print it out
+	gb_loadclassinfo
+	gb_loadcatinfo
+	gb_querystudent
+	echo " "
+	echo "***** Printing report for $stuln, $stufn *****"
+	echo " "
+	while readrec ; do
+	    gb_runreport | lpr $lproptions
+	done < <(recsel -t 'students' -e "Last_Name = '$stuln' && First_Name = '$stufn'" "$gradebook")
+	;;
+    studentraw)
+	## Function to retrieve raw student info: $stuln, $stufn
+	gb_querystudent
+	echo " "
+	echo "***** Raw Database Record *****"
+	echo " "
+	recsel -t 'students' -e "Last_Name = '$stuln' && First_Name = '$stufn'" "$gradebook"
+	echo " "
+	exit 0
+	;;
+    zeronoscores)
+	## zero-out "no-score" items, creating item and setting it to zero
+	## for students who do not yet have a record of it
+	gradeitem=$1
+	if ! gb_itemexist $gradeitem; then
+	    echo "No gradeitem found with this name: $gradeitem"
+	    exit 1
+	fi
+	gb_backup
+	echo "For students who do not have an existing score for $gradeitem, creating it and setting to zero"
+	gb_noscoretozero
+	exit 0
+	;;
+
+    diy)
+	## List possibly-dangerous, do-it-yourself useful stuff here.  Idea is
+	## for user to do it on their own, with full recognition of
+	## the prospect of screwing things up if done wrong.  Might
+	## consider integrating these into "gb" functionality at some
+	## point, but they seem rare enough that just listing them
+	## here is good enough. Remove from here if given own function.
+	echo "--*-- do-it-yourself: interesting and possibly dangerous tips and techniques for gradebook manipulation --*--"
+	echo " "
+	echo "After grading an in-class quiz, note as absent all those students who got a zero"
+	echo " "
+	echo "  recset -t students -e 'quiz1_0121 = 0' -f absent -a \"jan 21\" gradebook.rec"
+	echo " "
+	echo "Use a group template to generate email bodies for groups"
+	echo "  recsel -G group -t \"students\" -p \"group,First_Name,Last_Name,ASURITE\" gradebook-hst318.rec | recfmt -f groups-email.tmpl"
+	echo "  NOTE: field is now \"email:\", need to change template"
+	echo " "
+	echo "Select scores on midterms for students who did, and did not, use study sheets (HST 101, Fall 2015); 
+              filter out zero scores ; graph using \"mystats\""
+	echo "  --For those who used one:"
+	echo "  recsel -C -t 'students' -e \"midterm_studysheet = 'yes'\" -R midterm gradebook-hst101.rec | mystats - 1"
+	echo "  --and for those who did not:"
+	echo "  recsel -C -t 'students' -e \"midterm_studysheet != 'yes'\" -R midterm gradebook-hst101.rec | grep -v '^0$' | mystats - 1"
+	echo " "
+	echo "Generate a PDF of group members, including group number, topic, and group "
+	echo "leader, but no emails."
+	echo " "
+	echo "recsel -t groups -p \"group,topic,name,leader\" gradebook.rec | sed 's/^$/\n\n/' \ "
+	echo "  | enscript -b\"HST 318 Disaster Groups and Topics -- Feb. 9, 2016\" -t\"HST 318 Groups\" \ "
+	echo "  -o - | ps2pdf - ./groups.pdf"
+	echo " "
+	echo "Print a set of student reports with one-time LPR options"
+	echo " "
+	echo "gb savereports      # To generate a text file of reports, with linefeeds"
+	echo "lpr -P Canon_ImageRunner -o sides=one-sided student-reports-02232016.txt"
+	echo " "
+
+	;;
+    *)
+       ## Unrecognized option
+       echo "Option $gbcommand not understood." 
+       gb_showhelp
+       exit 1
+       ;;
+esac
+
+exit 0
+###########################################################
