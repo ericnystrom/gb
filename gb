@@ -4,11 +4,11 @@
 ##
 ## By Eric Nystrom, started: September 2015
 ##
-version="March 3, 2016"
+version="September 21, 2016"
 ##
 ## Usage:
 ##
-##   gb COMMAND gradebook.rec
+##   gb COMMAND [gradebook.rec]
 ##
 ##   For help, run without options or command "help"
 
@@ -17,16 +17,20 @@ version="March 3, 2016"
 ###################################
 
 #   ##### Grade Items #####
-# - implement combo "create item and grade it for all students" function
 # - explore auto-creating "file request" through Dropbox for Education for collecting
 #     student papers; students do not need Dropbox to submit
 # - allow storage of comments: either item at student level, or enabled across the
 #     gradebook for a particular item (like bonus), latter might be easier to report.
 # - option to calculate final grades and add to student's record
+# - in "gradeeach" command, have assignment due date as default date of absence if grade was zero
+# - in "grade" and "gradeeach" commands, check for existing score in field and
+#     prompt to continue (those commands will overwrite existing)
+# - check "makeitem" and "makecat" names for recutils illegal field characters such as a dash
 #
 #   ##### Grade Book Setup and Care #####
-# - prohibit writing to "closed" gradebook (-t classinfo status: closed)
 # - command to close out gradebook
+# - prohibit writing to "closed" gradebook (-t classinfo status: closed)
+# - write gradebook check function, so we can be sure filename is a gb gradebook
 # - gradebook consistency checks: ensure all items contain bonus field in bonus-having category, total worth of categories
 # - permit multiple dropped assignments
 # - permit multiple bonus assignments in a category
@@ -42,27 +46,24 @@ version="March 3, 2016"
 #
 #   ##### Groups #####
 # - Group email feature (external template?)
-# - Implement Group Grades
+# - Email group leaders (external template?)
+# - Implement Group Grades ("gradeeach" equivalent)
 # - Implement procedure to apply group grade(s) to group members (permitting adjustment if needed)
 #     step thru students, pull group, finding group grade
-# - Dialog to set group leader
-# - Dialog to set group topic
-# - Email group leaders (external template?)
+# - Set number per group in class setup info, not in "gb" itself
 #
 #   ##### Other Ideas / Features #####
 # - Add dialog to create a new student
-# - Interactive command to add grade to student/group record prompting for score each time
 # - Flexible/loadable grading schemes (A+/A/A-...)
 # - support for recording and exporting Academic Status Reports
 # - support for using ~/.gbrc to set some default parameters
+# - Definitively resolve the "Full" vs. "Name_First && Name_Last" question and refactor throughout
 #
 #   ##### Documentation / Generalization / Dissemination #####
 # - Write comprehensive documentation
 # - Create example gradebook as part of documentation
 # - Note interesting but potentially-dangerous tips in "diy" section (ongoing)
 # - genericize importer interface/scripts?
-# - version control for "gb" development
-# - post to github?
 
 #######################################################
 ### Dependencies, command line options and settings ###
@@ -132,15 +133,21 @@ function gb_showhelp() {
     echo "  makecat      : Make new grade category"
     echo "  makeitem     : Make new grade item in existing category"
     echo "  makegroups   : Create student groups, randomly, updating student and group records"
-    echo "  addgrade     : add entry for existing grade item to all student records (default score 0)"
+    echo "  grade        : enter grade score for one student, GRADEITEM prompted or supplied"
+    echo "  gradeeach    : add entry and prompt for each student grade (grade item must exist)"
+    echo "  gradeall     : add entry for existing grade item to all student records (default score 0)"
     echo "  noscoreitem  : show numbers of students with/without record of GRADEITEM"
     echo "  zeronoscores : zero-out no-score GRADEITEM, creating item and setting it to zero for students w/o it"
+    echo "  absent       : Prompt student name, and mark absent by date"
+    echo "  excused      : Prompt student name, marked excused with note"
     echo "  absentcount  : Count of noted-absences by student"
     echo "  absentsort   : Count of noted-absences, sorted by number"
     echo "  dropstudent  : move student record to \"dropped\" status, with date"
     echo "  student      : Run grade report for one student and display"
     echo "  studentprint : Run grade report for one student and print it out"
     echo "  studentraw   : Show raw database record for one student"
+    echo "  grouplead    : Interactively set leader for each group"
+    echo "  grouptopic   : Interactively set topic for each group"
     echo " "
     echo "  reports      : run a batch of student reports, print to screen"
     echo "  savereports  : run batch of reports, save in file student-reports-DATE.txt"
@@ -154,54 +161,70 @@ function gb_showhelp() {
     echo " "
 }
 
-function gb_addgradeall() {
-    ## pass grade item name and default score to function
+function gb_absent() {
+    ## pass student firstname- $stufn ($1) lastname- $stuln ($2) date of absence ($3)
+    recset -t students -e "Last_Name = '$2' && First_Name = '$1'" -f absent -a "$3" \
+	   "$gradebook" || { echo 'failed to insert absent date $absentdate in student record (recset exit non-zero)' ; exit 1; }
+}
+    
+function gb_addgradeall() {    ## Add a gradeitem and score to all
+    ## student records pass gradeitem ($1), score ($2).  NOTE: If item
+    ## already exists, will create duplicate grade field rather than
+    ## overwrite existing grade
     #Example: recset -t 'students' -f 'dsa_0820_GTKY' -a '100' gradebook-hst318.rec
-    recset -t 'students' -f "$1" -a "$2" "$gradebook"
-    if [[ $? -ne 0 ]];
-    then
-       echo "Something went wrong: recset exit code: $?"
-    fi
+    recset -t 'students' -f "$1" -a "$2" "$gradebook" || { echo 'failed to add grade (recset exit non-zero)' ; exit 1; }
 }
 
 function gb_backup() {
     writedir=$(dirname $gradebook)
     gbname=$(basename $gradebook .rec)
-    cp "$gradebook" "$writedir/$gbname.rec.bak"
+    cp "$gradebook" "$writedir/$gbname.rec.bak" || { echo 'failed to back up gradebook: $gradebook (cp exit non-zero)' ; exit 1; }
 }
 
 function gb_blankorlf() {    ## Add a blank line, or a linefeed if desired; helps with printing
-	## Set $addlf to control this function
-	if [[ "$addlf" == "yes" ]]; then
-	    echo -ne "\\f"
-	else
-	    echo " "
-	fi
+    ## Set $addlf to control this function
+    if [[ "$addlf" == "yes" ]]; then
+	echo -ne "\\f"
+    else
+	echo " "
+    fi
 }
 
 function gb_dropstudent() {     ## If $1 = $stuln and $2 = $stufn, drop student from class
-    	read -p "Drop date (e.g. \"nov 15\"): " dropdate
+    read -p "Drop date (e.g. \"nov 15\"): " dropdate
+    
+    ## Extract full student record using precise first and last names
+    sturecord=$(recsel -t 'students' -e "Last_Name = '$1' && First_Name = '$2'" "$gradebook")
+    if [[ -z $sturecord ]]; then
+	echo "Problem retrieving student record, exiting"
+	exit 1
+    fi
+    
+    ## use recins to insert that record into 'dropped' category in gradebook
+    recins -t 'dropped' -r "$sturecord" "$gradebook" || { echo 'failed to insert record (recins exit non-zero)' ; exit 1; }
+    
+    ## use recset to add "dropdate" field to the record in "dropped" category
+    recset -t 'dropped' -e "Last_Name = '$1' && First_Name = '$2'" \
+	   -f dropdate -a "$dropdate" "$gradebook" || { echo 'failed to insert record (recset exit non-zero)' ; exit 1; }	
+    
+    ## use recdel to remove that student's record from "students" category
+    recdel -t 'students' -e "Last_Name = '$1' && First_Name = '$2'" \
+	   "$gradebook" || { echo 'failed to insert record (recdel exit non-zero)' ; exit 1; }
+    
+    echo "Student $2 $1 status changed to \"dropped\" effective $dropdate."
+    return 0
+}
 
-	## Extract full student record using precise first and last names
-	sturecord=$(recsel -t 'students' -e "Last_Name = '$1' && First_Name = '$2'" "$gradebook")
-	if [[ -z $sturecord ]]; then
-	    echo "Problem retrieving student record, exiting"
-	    exit 1
-	fi
+function gb_excused() {
+    ## pass student firstname- $stufn ($1) lastname- $stuln ($2) date/explanation of excused absence ($3)
+    recset -t students -e "Last_Name = '$2' && First_Name = '$1'" -f excused -a "$3" \
+	   "$gradebook" || { echo 'failed to insert excused absence in student record (recset exit non-zero)' ; exit 1; }
+}
 
-	## use recins to insert that record into 'dropped' category in gradebook
-	recins -t 'dropped' -r "$sturecord" "$gradebook" || { echo 'failed to insert record (recins exit non-zero)' ; exit 1; }
-	
-	## use recset to add "dropdate" field to the record in "dropped" category
-	recset -t 'dropped' -e "Last_Name = '$1' && First_Name = '$2'" \
-	       -f dropdate -a "$dropdate" "$gradebook" || { echo 'failed to insert record (recset exit non-zero)' ; exit 1; }	
-	
-	## use recdel to remove that student's record from "students" category
-	recdel -t 'students' -e "Last_Name = '$1' && First_Name = '$2'" \
-	       "$gradebook" || { echo 'failed to insert record (recdel exit non-zero)' ; exit 1; }
-
-	echo "Student $2 $1 status changed to \"dropped\" effective $dropdate."
-	return 0
+function gb_grade() {     ## add single grade item to student record; NOTE will overwrite an existing score
+    ## pass student firstname- $stufn ($1) lastname- $stuln ($2) grade item ($3) score ($4)
+    recset --verbose -t students -e "Last_Name = '$2' && First_Name = '$1'" -f "$3" -S "$4" \
+	   "$gradebook" || { echo 'failed to insert grade in student record (recset exit non-zero)' ; exit 1; }   
 }
 
 function gb_gradeplot() {     ## Plot histogram of gradeitem scores
@@ -235,6 +258,12 @@ function gb_gradestats() {     ## Print statistics about a gradeitem
 	echo "Statistics for grade item \"$1\" (zero-length grades INCLUDED)"
 	recsel -C -t 'students' -P "$1" "$gradebook" | gnuplot -e 'stats "-" using 1' 2>&1
     fi
+}
+
+function gb_groupset() {      ## Set a group field
+    ## pass group number ($1), field to set ($2), value ($3)
+    recset --verbose -t groups -e "group = '$1'" -f "$2" -S "$3" \
+	   "$gradebook" || { echo 'failed to set group $1 field $2 value $3 (recset exit non-zero)' ; exit 1; } 
 }
 
 function gb_itemexist() {     ## Check if a gradeitem exists in gradebook
@@ -337,7 +366,7 @@ function gb_makecat() {
     read -p "Is this correct? Y/y to insert into gradebook, any other key to exit: " doinsert
     if [[ "$doinsert" == "y" || "$doinsert" == "Y" ]]; then
 	gb_backup
-	recins -t 'category' \
+	recins --verbose -t 'category' \
 	       -f 'name' -v "$new_cat_name" \
 	       -f 'id' -v "$new_cat_id" \
 	       -f 'worth' -v "$new_cat_worth" \
@@ -489,8 +518,9 @@ function gb_makeitem() {      ## Make item in existing category
 	    fi
 	    echo "Grade item \"$new_item\" created and entered."
 	    echo " "
-	    echo "You perhaps might want to do \"gb addgrade $gradebook $new_item\" next,"
-	    echo "  to place this item on all student records with a default score."
+	    echo "You perhaps might want to do \"gb gradeall $gradebook $new_item\" "
+	    echo "or \"gb gradeeach $gradebook $new_item\" (to enter interactively)"
+	    echo "  next, to place this item on all student records with a default score."
 	    exit 0
 	else
 	    echo " "
@@ -599,11 +629,7 @@ function gb_newgradebook() {      ## Make new gradebook
 
 function gb_noscoretozero() {       ## for students WITHOUT gradeitem, add it and set to zero
     ## Be sure to test for item; back up gradebook first.
-    recset -t 'students' -e "!#$gradeitem" -f "$gradeitem" -a '0' "$gradebook"
-    if [[ $? -ne 0 ]];
-    then
-       echo "Something went wrong: recset exit code: $?"
-    fi
+    recset -t 'students' -e "!#$gradeitem" -f "$gradeitem" -a '0' "$gradebook" || { echo 'failed to add grade (recset exit non-zero)' ; exit 1; }
 }
 
 function gb_plot() {     ## Pipe a list of grades here; -->letters, histogram-->stdout
@@ -675,7 +701,7 @@ function gb_querystudent() {      ## Prompt user for student name and set $stuln
 	echo "No students found with search string \"$stuqln\""
 	exit 1
     fi
-
+    echo " "
     ## Now in either case we should have one good $stufn, $stuln pair
     ## This gets set and can be used outside function
     #echo "Student is: $stuln, $stufn"
@@ -929,6 +955,9 @@ if [[ a"$1" == "a" ]]; then
     exit 0
 fi 
 
+## Open a second file descriptor to use for reading input during a while loop
+exec 3<> /dev/stdin
+
 ## Capture the "command" parameter and shift
 gbcommand=$1
 shift
@@ -957,56 +986,32 @@ shortdate=$(date +'%m%d%Y')
 ###############################
 
 case $gbcommand in
+    absent)
+	## Query for student name, mark them absent, with default of today's date
+	echo "***** Mark a student absent *****"
+	echo " "
+	gb_backup
+	gb_querystudent
+	read -p "What date was the student absent? (RETURN for: $today) " absdate
+	if [[ ${#absdate} -le 1 ]]; then
+	    absdate="$today"
+	fi
+	gb_absent "$stufn" "$stuln" "$absdate"
+	;;
     absentcount)
 	## Count of noted absences by student
-	##   Only considers "absent:" field, NOT "excused_absence:" field
+	##   Only considers "absent:" field, NOT "excused:" field
 	##   Rewrites field names for clarity
-	echo "Report of *noted* absences as of $today"
+	echo "Report of *noted* (non-excused) absences as of $today"
 	echo " "
 	recsel -t students -p "Full:Name,count(absent):Noted_Absences" "$gradebook"
 	;;
     absentsort)
 	## Count of noted absences, sorted by number of absences
-	##   Only considers "absent:" field, NOT "excused_absence:" field
-	echo "Report of *noted* absences as of $today"
+	##   Only considers "absent:" field, NOT "excused:" field
+	echo "Report of *noted* (non-excused) absences as of $today"
 	echo " "
 	recsel -t students -R "count(absent),Full" "$gradebook" | sed -e '/^$/d' | sort -nr
-	;;
-    addgrade)
-	## add existing grade item to all student records, set default grade
-
-	## Be sure we have correct parameters
-	if [[ -z $1 ]];
-	then
-	    echo "Must provide grade item name and, optionally, default grade"
-	    echo "  (default score is zero if left off)"
-	    echo " "
-	    echo "e.g. to add grade \"exam1\" to all students with a default score of 50:"
-	    echo " "
-	    echo "  gb addgrade [GRADEBOOK.rec] exam1 50"
-	    exit 1
-	fi
-
-	## Set default grade if blank
-	if [[ -z $2 ]];
-	then
-	    defaultgrade=0
-	else
-	    defaultgrade=$2
-	fi
-
-	## Set gradeitem; test existence of gradeitem in gradebook
-	gradeitem=$1
-	if ! gb_itemexist $gradeitem; then
-	    echo "No gradeitem found with this name: $gradeitem"
-	    exit 1
-	fi
-	
-	gb_backup
-	gb_addgradeall $gradeitem $defaultgrade
-	
-	echo "Added grade item $gradeitem to all students with score $defaultgrade."
-	exit 0
 	;;
     briefinfo)
 	## RENAME? -- Show brief info about class, categories
@@ -1036,6 +1041,15 @@ case $gbcommand in
 	gb_dropstudent "$stuln" "$stufn"
 
 	exit 0
+	;;
+    excused)
+	## Query for student name, mark them as having excused absence (excused:) with explanation
+	echo "***** Note a student's excused absence *****"
+	echo " "
+	gb_backup
+	gb_querystudent
+	read -p "Provide date and notes for excused absence: " excuse
+	gb_excused "$stufn" "$stuln" "$excuse"
 	;;
     finalbrief)
 	## Complete set of final grades in brief form, display on screen
@@ -1072,6 +1086,124 @@ case $gbcommand in
 	    gb_runreport finalonly
 	done < <(recsel -t students "$gradebook") | cut -d'	' -f2 | gnuplot -e 'stats "-" using 1' 2>&1
 	exit 0
+	;;
+    grade)
+	## Query for grade item or take from command line; query for
+	## student, query for grade, then record.
+	echo " "
+	echo "***** Add a grade to a student's record *****"
+	echo " "
+	## Check supplied grade item name, prompt for one if null
+	if [[ -z $1 ]];
+	then
+	    ## If prompting, first display info about known grade items
+	    gb_loadclassinfo
+	    gb_loadcatinfo
+	    gb_showlongcatinfo
+	    read -p "What existing grade item to add and grade? " gradeitem
+	    if gb_itemexist $gradeitem; then
+		echo "     Grade item: $gradeitem"
+	    else
+		echo "Grade item $gradeitem not found, exiting."
+		exit 1
+	    fi
+	else
+	    gradeitem=$1
+	    if gb_itemexist $gradeitem; then
+		echo "     Grade item: $gradeitem"
+	    else
+		echo "Grade item $gradeitem not found, exiting."
+		exit 1
+	    fi
+	fi
+	
+	echo " "
+	gb_backup
+
+	## Get student name
+	gb_querystudent
+	## Get grade score
+	read -p "Score for item $gradeitem: " gradescore
+	## Add to record
+	gb_grade "$stufn" "$stuln" "$gradeitem" "$gradescore"
+	;;
+    gradeall)
+	## add existing grade item to all student records, set default grade
+
+	## Be sure we have correct parameters
+	if [[ -z $1 ]];
+	then
+	    echo "Must provide grade item name and, optionally, default grade"
+	    echo "  (default score is zero if left off)"
+	    echo " "
+	    echo "e.g. to add grade \"exam1\" to all students with a default score of 50:"
+	    echo " "
+	    echo "  gb gradeall [GRADEBOOK.rec] exam1 50"
+	    exit 1
+	fi
+
+	## Set default grade if blank
+	if [[ -z $2 ]];
+	then
+	    defaultgrade=0
+	else
+	    defaultgrade=$2
+	fi
+
+	## Set gradeitem; test existence of gradeitem in gradebook
+	gradeitem=$1
+	if ! gb_itemexist $gradeitem; then
+	    echo "No gradeitem found with this name: $gradeitem"
+	    exit 1
+	fi
+	
+	gb_backup
+	gb_addgradeall $gradeitem $defaultgrade
+	
+	echo "Added grade item $gradeitem to all students with score $defaultgrade."
+	exit 0
+	;;
+    gradeeach)
+	## Use in place of "gradeall", to add an existing grade item
+	## to each student interactively and prompt for score for
+	## each.
+	gb_backup
+
+	## Grab grade item name; be sure we have correct parameters
+	if [[ -z $1 ]];
+	then
+	    echo "Must provide grade item name"
+	    echo " "
+	    echo "e.g. to add grade \"exam1\" to all students and grade interactively:"
+	    echo " "
+	    echo "  gb gradeeach [GRADEBOOK.rec] exam1"
+	    echo " "
+	    exit 1
+	fi
+
+	## Set gradeitem; test existence of gradeitem in gradebook
+	gradeitem=$1
+	if ! gb_itemexist $gradeitem; then
+	    echo "No gradeitem found with this name: $gradeitem"
+	    exit 1
+	fi
+
+	echo "Entering grades for item: $gradeitem"
+	echo " "
+	## Note use of alternate file descriptor, to permit reading inside while read loop; initialized at the top of the program
+	while readrec ; do
+	    read -u 3 -p "Student: $Last_Name, $First_Name : " stugrade
+	    ## Insert grade; if grade is zero, ask if absent too
+	    gb_grade "$First_Name" "$Last_Name" "$gradeitem" "$stugrade"
+	    
+	    if [[ "$stugrade" == "0" ]]; then	# note: test as string to avoid float/int problems
+		read -u 3 -p "   Zero grade entered; mark as absent? Enter date or return to skip: " absentdate
+		## Insert the absent note, if there is one
+		if [[ ${#absentdate} -gt 1 ]]; then
+		    gb_absent "$First_Name" "$Last_Name" "$absentdate"
+		fi
+	    fi
+	done < <(recsel -t students "$gradebook")
 	;;
     gradeplot)
 	## Plot out the grade stats for a particular grade item, converted to 100% scale
@@ -1127,6 +1259,105 @@ case $gbcommand in
 	
 	gb_gradestats $gradeitem $2
 	;;
+    grouplead)
+	## Interactively set group leader for each group
+	gb_backup
+	## iterate over list of groups, get name of student who is group leader, set it
+	while readrec ; do
+	    echo "Group $group members: "
+	    ## Number of members in group
+	    groupmembers=${#name[@]}
+
+	    ## Print existing leader, if there is one
+	    if [[ ! -z $leader ]]; then
+		echo "Existing leader: $leader"
+	    fi
+	    
+	    # use for loop to print names with numbers we can use to choose one
+	    for (( i=1; i < ${groupmembers}+1; i++ ));
+	    do
+		echo "   $i: ${name[$i-1]}"
+	    done
+
+    	    ## Note use of alternate file descriptor, to permit
+	    ## reading inside while read loop; initialized at the top
+	    ## of the program
+	    read -u 3 -p "Number of group leader? : " leadernum
+
+	    ## Skip the rest if leader prompt is blank
+	    if [[ "a$leadernum" == "a" ]]; then
+		echo "Skipping."
+		echo " "
+		continue
+	    fi
+
+	    ## Set group leader
+	    echo "Setting group leader: ${name[$leadernum-1]}"
+	    echo " "
+	    gb_groupset $group leader "${name[$leadernum-1]}"
+
+	    ## Have to unset "name" array because groups with 5
+	    ## followed by groups of 4 will spill over; ditto "leader"
+	    unset name
+	    unset leader
+	done < <(recsel -t groups "$gradebook")	
+	;;
+    grouptopic)
+	## Interactively set topic for each group
+	gb_backup
+	## iterate over list of groups, check topic if existing, set
+	## existing or new as desired
+	while readrec ; do
+	    echo "Group $group members: "
+	    ## Number of members in group
+	    groupmembers=${#name[@]}
+
+	    ## Print existing leader, if there is one
+	    if [[ ! -z $leader ]]; then
+		echo "Leader: $leader"
+	    fi
+
+	    ## Print group members
+	    for i in "${name[@]}" ; do
+		echo "   * $i"
+	    done
+
+	    ## Print existing topic, if there is one, prompt for
+	    ## change if desired (note use of alternate file
+	    ## descriptor to read inside while loop)
+	    if [[ ! -z $topic ]]; then
+		echo "Existing topic: $topic"
+		read -u 3 -p "   Enter new topic, or RETURN to leave unchanged? : " picktopic
+		## If there's something new here, set it to $topic
+		if [[ ! -z $picktopic ]]; then
+		    topic=$picktopic
+		fi
+	    else
+		## No existing topic, prompt for one
+		read -u 3 -p "Group topic? : " topic		
+	    fi
+
+	    ## Skip the rest if topic prompt is blank
+	    if [[ "a$topic" == "a" ]]; then
+		echo "Skipping."
+		echo " "
+		continue
+	    fi
+
+	    ## Set group topic
+	    echo "Setting group topic: $topic"
+	    echo " "
+	    gb_groupset $group topic "$topic"
+
+	    ## Have to unset "name" array because groups with 5
+	    ## followed by groups of 4 will spill over; ditto "leader" and "topic"
+	    unset name
+	    unset leader
+	    unset topic
+	    unset picktopic
+	done < <(recsel -t groups "$gradebook")	
+	;;
+    
     help)
         ## Explain the options
 	gb_showhelp
@@ -1280,6 +1511,10 @@ case $gbcommand in
 	echo " "
 	echo "gb savereports      # To generate a text file of reports, with linefeeds"
 	echo "lpr -P Canon_ImageRunner -o sides=one-sided student-reports-02232016.txt"
+	echo " "
+	echo "Get count of students in class"
+	echo " "
+	echo "recsel -t students -c gradebook.rec"
 	echo " "
 
 	;;

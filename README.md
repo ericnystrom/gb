@@ -1,6 +1,6 @@
 # gb -- a Bash and `recutils` gradebook
 
-Last updated: July 24, 2016
+Last updated: Sept. 21, 2016
 
 ## Background
 
@@ -10,6 +10,10 @@ information; a frustration with the limited capabilities of the gradebook
 feature of Blackboard; and a desire to have fine-grained control, preferably
 from the command line, over both individual student records as well as
 aggregate class statistics.
+
+`gb` is intended as a helper program, to augment manual editing of the
+text-based gradebook in `recutils` format, though over time the program has
+been made capable of handling most common gradebook tasks.
 
 ## Operating philosophy
 
@@ -30,7 +34,7 @@ A category can be set to automatically drop the lowest grade -- for example,
 six quizzes might be taken, but the lowest one dropped.  An item may also
 count as a "bonus" within a category.
 
-I prefer the category/item structure so that impromptu or unexpected
+The category/item structure means that impromptu or unexpected
 assignments, such as a pop quiz or a graded discussion, can be added to a
 category without impacting the balance of the grading for the rest of the
 course.  If, for example, one category was "participation" grades, an
