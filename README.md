@@ -1,6 +1,6 @@
 # gb -- a Bash and `recutils` gradebook
 
-Last updated: Sept. 21, 2016
+Last updated: Dec. 31, 2017
 
 ## Background
 
@@ -54,5 +54,6 @@ Download and locate somewhere in your $PATH.  Ensure dependencies are met
 ## Caveats
 
 Developed on a Debian Linux system. Suggestions to enhance portability to
-other Unix-like systems would be welcomed.
+other Unix-like systems would be welcomed, though Bash will continue to be
+required because of `readrec`.
 
