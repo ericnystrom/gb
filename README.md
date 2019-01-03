@@ -1,6 +1,6 @@
 # gb -- a Bash and `recutils` gradebook
 
-Last updated: Dec. 31, 2017
+Last updated: Jan. 3, 2019
 
 ## Background
 

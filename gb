@@ -4,7 +4,7 @@
 ##
 ## By Eric Nystrom, started: September 2015
 ##
-version="December 31, 2017"
+version="January 03, 2019"
 ##
 ## Usage:
 ##
@@ -25,7 +25,6 @@ version="December 31, 2017"
 # - option to calculate final grades and add to student's record
 # - in "grade" and "gradeeach" commands, check for existing score in field and
 #     prompt to continue (those commands will overwrite existing)
-# - check "makeitem" and "makecat" names for recutils illegal field characters such as a dash
 #
 #   ##### Grade Book Setup and Care #####
 # - write gradebook check function, so we can be sure filename is a gb gradebook
@@ -33,7 +32,7 @@ version="December 31, 2017"
 # - permit multiple dropped assignments
 # - permit multiple bonus assignments in a category
 # - hooks for version control
-# - write CSV grade roster exporter, for importing to post final grades
+# - write CSV grade roster exporter, for exporting to post final grades
 # - consistency check - make sure all items held by students have grade item (exception of notes, etc?)
 # - add more recutils constraints on fields to some elements of gradebook (to aid consistency in inserting)
 #
@@ -76,6 +75,13 @@ fi
 if ! which gnuplot &>/dev/null; then
     echo "Missing dependency, aborting: gnuplot"
     exit 4
+fi
+
+## Check dependency on "xsel" (part of "" package in
+## Debian), for copying reports to copy+paste buffer
+## Just complain if not found, since this isn't used widely
+if ! which xsel &>/dev/null; then
+    echo "Missing dependency \"xsel\": report copy+paste disabled"
 fi
 
 ## requires recutils and, specifically, requires "readrec" bash
@@ -153,6 +159,7 @@ function gb_showhelp() {
     echo "  reports      : run a batch of student reports, print to screen"
     echo "  savereports  : run batch of reports, save in file student-reports-DATE.txt"
     echo "  printreports : run student reports, send directly to printer"
+    echo "  copyreports  : run student reports, copying to buffer for pasting individually"
     echo "  gradestats   : show class stats for GRADEITEM, specify \"nozero\" to exclude scores of zero"
     echo "  gradeplot    : breakdown (by pct) class stats for GRADEITEM, specify \"nozero\" to exclude scores of zero"
     echo "  finalbrief   : report of current final grades for whole class, one student per line"
@@ -364,7 +371,15 @@ function gb_makecat() {
     
     ## Confirm with user
     echo " "
-    echo "name: $new_cat_name"
+    ## Check for legal recutils field name (for item); the regex here comes from recutils documentation
+    if [[ "$new_cat_name" =~ [a-zA-Z%][a-zA-Z0-9_]* ]]; then
+	    echo "name: $new_cat_name"
+    else
+	echo "Category name \"$new_cat_name\" not permitted."
+	echo " "
+	echo "Category names must start with letter, and consist of letters, numbers, and underscore."
+	exit 1
+    fi
     echo "id: $new_cat_id"
     echo "worth: $new_cat_worth"
     echo "lowdrop: $new_cat_lowdrop"
@@ -495,7 +510,15 @@ function gb_makeitem() {      ## Make item in existing category
 	
 	## Confirm with user
 	echo " "
-	echo "item: $new_item"
+	## Check for legal recutils field name (for item); the regex here comes from recutils documentation
+	if [[ "$new_item" =~ [a-zA-Z%][a-zA-Z0-9_]* ]]; then
+	    echo "item: $new_item"
+	else
+	    echo "Item name \"$new_item\" not permitted."
+	    echo " "
+	    echo "Items must start with letter, and consist of letters, numbers, and underscore."
+	    exit 1
+	fi
 	echo "cat: $newitemcat"
 	echo "duedate: $new_duedate"
 	echo "desc: $new_desc"
@@ -1064,6 +1087,29 @@ case $gbcommand in
 	else
 	    exit 0
 	fi
+	;;
+    
+    copyreports)
+	## Run a batch of student reports; student by student, copying
+	## first the email address then the report itself into the
+	## buffer. Intended to assist with pasting into emails.
+	gb_loadclassinfo
+	gb_loadcatinfo
+
+	while readrec ; do
+	    echo "Student: $First_Name $Last_Name, email: $email"
+	    echo "$email" | xsel -b
+	    ## Note use of alternate file descriptor
+	    read -n1 -u 3 -p "  EMAIL copied to buffer. Press any key to continue..."
+	    echo " "
+	    gb_runreport | xsel -b
+	    read -n1 -u 3 -p "  REPORT copied to buffer. Press any key to continue..."
+	    echo " "
+	    echo " "
+	done < <(recsel -t students "$gradebook")
+	#gb_studentreports
+	exit 0
+	
 	;;
     
     dropstudent)
@@ -1742,6 +1788,10 @@ case $gbcommand in
 	echo "recsel -t groups -p \"group,topic,name,leader\" gradebook.rec | sed 's/^$/\n\n/' \ "
 	echo "  | enscript -b\"HST 318 Disaster Groups and Topics -- Feb. 9, 2016\" -t\"HST 318 Groups\" \ "
 	echo "  -o - | ps2pdf - ./groups.pdf"
+	echo " "
+	echo "Get a list of email addresses for a particular group"
+	echo " "
+	echo "recsel -t students -e \"group = 8\" -P email gradebook.rec"
 	echo " "
 	echo "Print a set of student reports with one-time LPR options"
 	echo " "
